@@ -143,6 +143,53 @@ class ChSelect(nn.Module):
 
 
 # custom   
+# class PhaseIFFTStack(nn.Module):
+#     """
+#     FFT 한 번 → 대역(mask) 3개 → IFFT → [B,3,H,W] (low, mid, high)
+
+#     YAML Args
+#         c1          (자동) 입력 채널
+#         c2          (무시) 항상 3 채널 출력
+#         cut_low     저역 반경 (0~0.5)   default=0.1
+#         cut_high    고역 반경           default=0.4
+#         norm        True → 0~1 정규화
+#     """
+#     def __init__(self, c1, c2=3, cut_low=0.11, cut_high=1.0, norm=True, eps=1e-6):
+#         super().__init__()
+#         self.cut_low, self.cut_high = cut_low, cut_high
+#         self.norm, self.eps = norm, eps
+#         self.register_buffer("rgb2y",
+#             torch.tensor([0.2989, 0.5870, 0.1140]).view(1,3,1,1))
+#         self.c2 = 3                         # 항상 3ch 출력
+
+#     # ── 내부: 마스크 만들기
+#     def _masks(self, H, W, dev):
+#         fy = torch.fft.fftfreq(H, device=dev).view(-1,1).repeat(1,W)
+#         fx = torch.fft.fftfreq(W, device=dev).view(1,-1).repeat(H,1)
+#         r  = torch.fft.fftshift((fx**2 + fy**2).sqrt())
+#         low  = (r <= self.cut_low)
+#         mid  = (r >  self.cut_low) & (r <= self.cut_high)
+#         high = (r >  self.cut_high)
+#         return low, mid, high
+
+#     @torch.cuda.amp.autocast(enabled=False)
+#     def forward(self, x):
+#         # RGB→Gray
+#         if x.shape[1] == 3:
+#             x = (x * self.rgb2y.to(x.dtype)).sum(1, keepdim=True)
+#         F = torch.fft.fft2(x.float(), norm='ortho')
+
+#         outs = []
+#         for m in self._masks(x.shape[2], x.shape[3], x.device):
+#             comp = torch.fft.ifftshift(F * m)   # 진폭·위상 모두 사용
+#             y = torch.fft.ifft2(comp, norm='ortho').real
+#             if self.norm:
+#                 #mn, mx = y.amin((2,3),True), y.amax((2,3),True)
+#                 #y = (y-mn)/(mx-mn + self.eps)
+#                 y = torch.clamp(y, 0, 255) / 255.0 # 0~255 -> 0~1로 정규화
+#             outs.append(y)
+#         return torch.cat(outs, 1).to(x.dtype)   # [B,3,H,W]
+    
 class PhaseIFFTStack(nn.Module):
     """
     FFT 한 번 → 대역(mask) 3개 → IFFT → [B,3,H,W] (low, mid, high)
@@ -150,26 +197,33 @@ class PhaseIFFTStack(nn.Module):
     YAML Args
         c1          (자동) 입력 채널
         c2          (무시) 항상 3 채널 출력
-        cut_low     저역 반경 (0~0.5)   default=0.1
-        cut_high    고역 반경           default=0.4
+        cut_low     저역 반경 (학습 가능)
+        cut_high    고역 반경 (항상 1.0로 고정)
         norm        True → 0~1 정규화
     """
-    def __init__(self, c1, c2=3, cut_low=0.1, cut_high=0.4, norm=True, eps=1e-6):
+    def __init__(self, c1, c2=3, cut_low=0.11, cut_high=1.0, norm=True, eps=1e-6):
         super().__init__()
-        self.cut_low, self.cut_high = cut_low, cut_high
-        self.norm, self.eps = norm, eps
+        self.cut_low = nn.Parameter(torch.tensor(cut_low, dtype=torch.float32))  # 학습 가능한 파라미터
+        self.cut_high = 1.0  # 고정 값 (입력 무시)
+        self.norm = norm
+        self.eps = eps
         self.register_buffer("rgb2y",
-            torch.tensor([0.2989, 0.5870, 0.1140]).view(1,3,1,1))
-        self.c2 = 3                         # 항상 3ch 출력
+            torch.tensor([0.2989, 0.5870, 0.1140]).view(1, 3, 1, 1))
+        self.c2 = 3
 
     # ── 내부: 마스크 만들기
     def _masks(self, H, W, dev):
         fy = torch.fft.fftfreq(H, device=dev).view(-1,1).repeat(1,W)
         fx = torch.fft.fftfreq(W, device=dev).view(1,-1).repeat(H,1)
         r  = torch.fft.fftshift((fx**2 + fy**2).sqrt())
-        low  = (r <= self.cut_low)
-        mid  = (r >  self.cut_low) & (r <= self.cut_high)
-        high = (r >  self.cut_high)
+
+        # cut_low는 학습 가능한 파라미터 → item()으로 float로 변환
+        low_val  = self.cut_low.clamp(0.0, 0.5).item()  # 안정성 위해 clamp
+        high_val = self.cut_high
+
+        low  = (r <= low_val)
+        mid  = (r >  low_val) & (r <= high_val)
+        high = (r >  high_val)
         return low, mid, high
 
     @torch.cuda.amp.autocast(enabled=False)
@@ -177,19 +231,20 @@ class PhaseIFFTStack(nn.Module):
         # RGB→Gray
         if x.shape[1] == 3:
             x = (x * self.rgb2y.to(x.dtype)).sum(1, keepdim=True)
+
         F = torch.fft.fft2(x.float(), norm='ortho')
 
         outs = []
         for m in self._masks(x.shape[2], x.shape[3], x.device):
-            comp = torch.fft.ifftshift(F * m)   # 진폭·위상 모두 사용
-            y = torch.fft.ifft2(comp, norm='ortho').real
+            comp = torch.fft.ifftshift(F * m)
+            #y = torch.fft.ifft2(comp, norm='ortho').real
+            y = torch.fft.ifft2(comp, norm='ortho').abs
             if self.norm:
-                mn, mx = y.amin((2,3),True), y.amax((2,3),True)
-                y = (y-mn)/(mx-mn + self.eps)
+                y = torch.clamp(y, 0, 255) / 255.0
             outs.append(y)
-        return torch.cat(outs, 1).to(x.dtype)   # [B,3,H,W]
-    
 
+        return torch.cat(outs, 1).to(x.dtype)  # [B, 3, H, W]
+    
 class PhaseIFFT_1(nn.Module):
     def __init__(self, c1, c2=1, keep_rgb_channels=False,
                  eps=1e-6, norm=True):
@@ -216,7 +271,7 @@ class PhaseIFFT_1(nn.Module):
                 mn = y.amin((2, 3), keepdim=True)
                 mx = y.amax((2, 3), keepdim=True)
                 y = (y - mn) / (mx - mn + self.eps)
-
+                y = torch.clamp(y, 0, 255) / 255.0
         # ③ 채널 복제
         if self.c2 > 1:
             y = y.repeat(1, self.c2 // y.shape[1], 1, 1)

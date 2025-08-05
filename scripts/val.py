@@ -2,8 +2,8 @@ import os
 import pandas as pd
 from ultralytics import YOLO
 
-data_name = '4875'
-experiment_name = "experiment_1"
+data_name = 'data01'
+experiment_name = "experiment_8"
 
 # 모델 로드
 model = YOLO(f"../experiments/runs/{experiment_name}/train/weights/best.pt")
