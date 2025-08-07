@@ -7,7 +7,7 @@ import os
 if __name__ == '__main__':
     # GPU 설정 (여러 GPU 사용 가능)
     epochs = 1500
-    batch = 120
+    batch = 128
     imgsz = 640
     device = '0'  # 0번과 1번 GPU를 사용하도록 명시적으로 지정
 <<<<<<< HEAD
@@ -17,8 +17,8 @@ if __name__ == '__main__':
     model_name = "yolo11m"
 =======
     data_name = "data01"
-    experiment_name = "experiment_15"
-    config_name = "fpsa_2_8n"
+    experiment_name = "experiment_18"
+    config_name = "fpsa_2_11n"
     model_name = "yolo11n"
 >>>>>>> c27b8988 (new_dataset, new config)
     model = YOLO(f'../configs/{config_name}.yaml').load(f'{model_name}.pt')
@@ -35,7 +35,7 @@ if __name__ == '__main__':
 
     # manual setting for dataloader workers
     worker = 8
-
+    
     # 데이터 증강 설정
     results = model.train(
         data=f'../Dataset/{data_name}/data.yaml',

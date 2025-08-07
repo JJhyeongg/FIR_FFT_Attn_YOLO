@@ -2,10 +2,10 @@ import os
 import pandas as pd
 from ultralytics import YOLO
 
-data_name = 'test_syj_951'
-experiment_name = "experiment_1"
+data_name = "data01"
+experiment_name = "experiment_8"
 # 모델 로드
-model = YOLO(f"../experiments/runs/{experiment_name}/train/weights/best.pt")
+model = YOLO(f"../experiments/{experiment_name}/train/weights/best.pt")
 
 # 검증 실행
 metrics = model.val(
