@@ -1,0 +1,57 @@
+# yolo11n_fft_gate_12.yaml
+# Requirements: PhaseIFFTStack, ChSelect, C3k2Gated
+nc: 80
+scales:
+  n: [0.50, 0.25, 1024]
+  s: [0.50, 0.50, 1024]
+  m: [0.50, 1.00, 512]
+  l: [1.00, 1.00, 512]
+  x: [1.00, 1.50, 512]
+
+backbone:
+  # mask branches from raw input
+  - [-1, 1, nn.Identity, []]              # 0: raw
+  - [0, 1, PhaseIFFTStack, [2,0.1,0.1,False]]            # 1: [B,3,H,W] (low,mid,high)
+  - [1, 1, ChSelect, [1, 0]]              # 2: low
+  - [1, 1, ChSelect, [1, 1]]              # 3: high
+
+  # P1
+  - [0, 1, Conv, [64, 3, 2]]              # 4: P1/2 (320)
+
+  # P2
+  - [4, 1, Conv, [128, 3, 2]]             # 5: P2/4 (160)
+  - [[5,3], 2, C3k2Gated, [256, False, 0.25]] # 6: p2 ← HIGH mask
+
+  # P3
+  - [6, 1, Conv, [256, 3, 2]]             # 7: P3/8 (80)
+  - [7, 2, C3k2, [512, False, 0.25]]      # 8: p3(keep)
+  # P4
+  - [8, 1, Conv, [512, 3, 2]]             # 9: P4/16 (40)
+  - [[9, 2], 2, C3k2Gated, [512, True]]   # 10: p4(keep) ← LOW mask
+
+
+  # P5
+  - [10, 1, Conv, [1024, 3, 2]]           # 11: P5/32 (20)
+  - [11, 2, C3k2, [1024, True]]           # 12: p5 (off)
+
+  - [12, 1, SPPF, [1024, 5]]              # 13
+  - [13, 2, C2PSA, [1024]]                # 14
+
+head:
+  - [14, 1, nn.Upsample, [None, 2, "nearest"]] # 15
+  - [[15, 10], 1, Concat, [1]]            # 16: cat P4
+  - [16, 2, C3k2, [512, False]]           # 17
+
+  - [17, 1, nn.Upsample, [None, 2, "nearest"]] # 18
+  - [[18, 8], 1, Concat, [1]]             # 19: cat P3
+  - [19, 2, C3k2, [256, False]]           # 20  (P3/8-small)
+
+  - [20, 1, Conv, [256, 3, 2]]            # 21
+  - [[21, 17], 1, Concat, [1]]            # 22: P4
+  - [22, 2, C3k2, [512, False]]           # 23  (P4/16-medium)
+
+  - [23, 1, Conv, [512, 3, 2]]            # 24
+  - [[24, 14], 1, Concat, [1]]            # 25: P5
+  - [25, 2, C3k2, [1024, True]]           # 26  (P5/32-large)
+
+  - [[20, 23, 26], 1, Detect, [nc]]       # 27
