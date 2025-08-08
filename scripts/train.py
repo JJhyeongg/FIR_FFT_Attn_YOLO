@@ -33,6 +33,7 @@ if __name__ == '__main__':
     # 데이터 증강 설정
     results = model.train(
         data=f'../Dataset/{data_name}/data.yaml',
+        pretrained = False,
         epochs=epochs,
         batch=batch,
         imgsz=imgsz,

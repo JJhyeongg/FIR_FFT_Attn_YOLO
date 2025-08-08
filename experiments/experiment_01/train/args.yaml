@@ -1,6 +1,6 @@
 task: detect
 mode: train
-model: ../configs/experiment_01.yaml
+model: ../configs/experiment_01n.yaml
 data: ../Dataset/data01/data.yaml
 epochs: 1500
 time: null
@@ -15,7 +15,7 @@ workers: 6
 project: ../experiments/experiment_01
 name: train
 exist_ok: false
-pretrained: true
+pretrained: false
 optimizer: auto
 verbose: true
 seed: 42
