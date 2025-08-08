@@ -15,7 +15,7 @@ workers: 6
 project: ../experiments/experiment_01
 name: train
 exist_ok: false
-pretrained: yolo11n.pt
+pretrained: true
 optimizer: auto
 verbose: true
 seed: 42

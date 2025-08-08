@@ -168,7 +168,7 @@ class PhaseIFFTStack(nn.Module):
     """
 
     def __init__(self, c1: int, c2: int = 2,
-                 cut_low: float = 0.11, cut_high: float = 0.40,
+                 cut_low: float = 0.11, cut_high: float = 0.11,
                  norm: bool = False, eps: float = 1e-6):
         super().__init__()
         assert c2 == 2, "PhaseIFFTStack은 2채널(low, high)만 지원합니다."

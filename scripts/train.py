@@ -12,10 +12,11 @@ if __name__ == '__main__':
     device = '0'  # 0번과 1번 GPU를 사용하도록 명시적으로 지정
     data_name = "data01"
     experiment_name = "experiment_01"
-    config_name = "experiment_01"
+    config_name = "experiment_01n"
     model_name = "yolo11n"
-    model = YOLO(f'../configs/{config_name}.yaml').load(f'{model_name}.pt')
+    #model = YOLO(f'../configs/{config_name}.yaml').load(f'{model_name}.pt')
 
+    model = YOLO(f'../configs/{config_name}.yaml')
     try:
         # Linux 
         n_cpus = len(os.sched_getaffinity(0))
