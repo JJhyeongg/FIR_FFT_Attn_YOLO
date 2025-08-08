@@ -19,6 +19,7 @@ Examples:
 
 from .block import (
     ###########################
+    C3k2Gated,
     Multiply,
     GatedAdd,
     PhaseIFFTStack,
@@ -113,6 +114,7 @@ from .transformer import (
 )
 
 __all__ = (
+    "C3k2Gated",
     "Multiply",
     "GatedAdd",
     "PhaseIFFTStack",

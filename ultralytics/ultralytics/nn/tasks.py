@@ -12,6 +12,7 @@ import torch.nn as nn
 
 from ultralytics.nn.autobackend import check_class_names
 from ultralytics.nn.modules import (
+    C3k2Gated,
     Multiply,
     GatedAdd,
     PhaseIFFTStack,
@@ -1615,6 +1616,7 @@ def parse_model(d, ch, verbose=True):
     layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
     base_modules = frozenset(
         {
+            C3k2Gated,
             PhaseIFFT_1,
             Classify,
             Conv,
@@ -1654,6 +1656,7 @@ def parse_model(d, ch, verbose=True):
     )
     repeat_modules = frozenset(  # modules with 'repeat' arguments
         {
+            C3k2Gated,
             BottleneckCSP,
             C1,
             C2,
@@ -1684,23 +1687,24 @@ def parse_model(d, ch, verbose=True):
                 with contextlib.suppress(ValueError):
                     args[j] = locals()[a] if a in locals() else ast.literal_eval(a)
         n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
+        
         if m in base_modules:
-            print(m)
-            c1, c2 = ch[f], args[0]
-            if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
+            # ✅ 수정 코드 (리스트 from 지원)
+            c1 = ch[f[0]] if isinstance(f, list) else ch[f]
+            c2 = args[0]
+            if c2 != nc:
                 c2 = make_divisible(min(c2, max_channels) * width, 8)
-            if m is C2fAttn:  # set 1) embed channels and 2) num heads
+            if m is C2fAttn:
                 args[1] = make_divisible(min(args[1], max_channels // 2) * width, 8)
                 args[2] = int(max(round(min(args[2], max_channels // 2 // 32)) * width, 1) if args[2] > 1 else args[2])
-
             args = [c1, c2, *args[1:]]
             if m in repeat_modules:
-                args.insert(2, n)  # number of repeats
+                args.insert(2, n)
                 n = 1
-            if m is C3k2:  # for M/L/X sizes
+            if m is C3k2 and scale in "mlx":
                 legacy = False
-                if scale in "mlx":
-                    args[3] = True
+                args[3] = True
+
             if m is A2C2f:
                 legacy = False
                 if scale in "lx":  # for L/X sizes

@@ -13,8 +13,9 @@ from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad
 from .transformer import TransformerBlock
 
 __all__ = (
+    "C3k2Gated",
     "Multiply",
-    "GataAdd",
+    "GateAdd",
     "PhaseIFFTStack",
     "ChSelect",
     "PhaseIFFT_1",
@@ -61,6 +62,7 @@ __all__ = (
 )
 
 # custom
+
 class Multiply(nn.Module):
     """
     Multiply: out = x * mask
@@ -143,118 +145,105 @@ class ChSelect(nn.Module):
 
 
 # custom   
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 class PhaseIFFTStack(nn.Module):
     """
-    FFT 한 번 → 대역(mask) 3개 → IFFT → [B,3,H,W] (low, mid, high)
-    """
-    def __init__(self, c1, c2=3, cut_low=0.1, cut_high=1.0, norm=True, eps=1e-6):
-        super().__init__()
-        self.cut_low = cut_low
-        self.cut_high = cut_high
-        self.norm = norm
-        self.eps = eps
-        self.register_buffer("rgb2y", torch.tensor([0.2989, 0.5870, 0.1140]).view(1,3,1,1))
-        self.c2 = 3
+    FFT → 주파수 대역 분리(low, high) → IFFT → [B,2,H,W]
+      - 채널 0: low  (r <= cut_low)
+      - 채널 1: high (r >= cut_high)
 
-    def _r_norm(self, H, W, device):
-        """ 중심 정규화된 반지름 맵 (NumPy 방식과 동일하게) """
-        y = torch.arange(H, device=device).view(-1, 1)
-        x = torch.arange(W, device=device).view(1, -1)
-        cy, cx = H // 2, W // 2
-        r = ((x - cx)**2 + (y - cy)**2).float().sqrt()
-        r_norm = r / r.max()
-        return r_norm  # shape: [H, W]
+    Args:
+        c1 (int): 입력 채널 수 (RGB=3 가정 시 자동 Y 변환)
+        c2 (int): 항상 2로 고정 (low, high)
+        cut_low (float): 저역 컷오프 (주파수 반경, 권장 범위 0~0.5)
+        cut_high (float): 고역 컷오프 (권장 범위 0~0.5, cut_high >= cut_low)
+        norm (bool): 대역 복원 결과를 각 샘플별 [0,1] 정규화 여부
+        eps (float): 정규화 안정성용 epsilon
+    Notes:
+        - 주파수 반경은 torch.fft.fftfreq 기반(단위: cycles/pixel), 최대 0.5 부근.
+        - AMP 혼합정밀 학습에서도 안전하도록 autocast 비활성 + float32 강제.
+    """
+
+    def __init__(self, c1: int, c2: int = 2,
+                 cut_low: float = 0.11, cut_high: float = 0.40,
+                 norm: bool = False, eps: float = 1e-6):
+        super().__init__()
+        assert c2 == 2, "PhaseIFFTStack은 2채널(low, high)만 지원합니다."
+        self.c2 = 2
+        self.cut_low = float(cut_low)
+        self.cut_high = float(cut_high)
+        self.norm = bool(norm)
+        self.eps = float(eps)
+
+        # RGB -> Y 변환 가중치
+        self.register_buffer(
+            "rgb2y",
+            torch.tensor([0.2989, 0.5870, 0.1140]).view(1, 3, 1, 1),
+            persistent=False
+        )
+
+        self._sanitize_cuts()
+
+    def _sanitize_cuts(self):
+        # 권장 범위 0~0.5로 클램프, cut_high >= cut_low 강제
+        lo = max(0.0, min(0.5, self.cut_low))
+        hi = max(0.0, min(0.5, self.cut_high))
+        if hi < lo:
+            hi = lo
+        self.cut_low, self.cut_high = lo, hi
+
+    def _make_masks(self, H: int, W: int, device, dtype):
+        # 주파수 그리드 (cycles/pixel). 범위 대략 [-0.5, 0.5)
+        fy = torch.fft.fftfreq(H, device=device, dtype=dtype).view(-1, 1).repeat(1, W)
+        fx = torch.fft.fftfreq(W, device=device, dtype=dtype).view(1, -1).repeat(H, 1)
+        r = torch.sqrt(fx * fx + fy * fy)  # 0 ~ ~0.5
+
+        low_mask = (r <= self.cut_low)
+        high_mask = (r >= self.cut_high)
+        return low_mask, high_mask
 
     @torch.cuda.amp.autocast(enabled=False)
-    def forward(self, x):
-        # 1. RGB → Grayscale
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: [B,C,H,W] (C=3 권장)
+        return: [B,2,H,W]  (0=low, 1=high), 입력 dtype으로 반환
+        """
+        orig_dtype = x.dtype
+
+        # RGB -> Y (C==3이면)
         if x.shape[1] == 3:
-            x = (x * self.rgb2y.to(x.dtype)).sum(1, keepdim=True)  # [B,1,H,W]
+            # rgb2y는 buffer라 x dtype에 맞춰 cast
+            x = (x * self.rgb2y.to(dtype=x.dtype, device=x.device)).sum(1, keepdim=True)
 
-        B, _, H, W = x.shape
-        F = torch.fft.fft2(x.float(), norm='ortho')               # [B,1,H,W]
-        F_shifted = torch.fft.fftshift(F, dim=(-2, -1))           # 중심 이동
+        # FFT 연산은 float32로 고정 (AMP off)
+        x32 = x.float()
 
-        r_norm = self._r_norm(H, W, x.device)                     # [H,W]
+        B, C, H, W = x32.shape
+        device = x32.device
 
-        # 마스크 정의 (NumPy 방식과 동일)
-        low_mask = (r_norm <= self.cut_low).float()
-        mid_mask = ((r_norm > self.cut_low) & (r_norm <= self.cut_high)).float()
-        high_mask = (r_norm > self.cut_high).float()
+        # 2D FFT
+        F2 = torch.fft.fft2(x32, norm='ortho')              # [B,1,H,W]
+        # 주파수 마스크
+        low_m, high_m = self._make_masks(H, W, device, dtype=x32.dtype)  # bool
+        low_m = low_m.view(1, 1, H, W)
+        high_m = high_m.view(1, 1, H, W)
 
-        masks = [low_mask, mid_mask, high_mask]
         outs = []
-
-        for m in masks:
-            m = m.unsqueeze(0).unsqueeze(0)  # [1,1,H,W]
-            m = m.expand(B, 1, H, W)         # 배치에 맞게 확장
-            F_filtered = F_shifted * m       # 마스크 곱
-            F_ishift = torch.fft.ifftshift(F_filtered, dim=(-2, -1))
-            img_back = torch.fft.ifft2(F_ishift, norm='ortho').abs()  # [B,1,H,W]
-
+        for m in (low_m, high_m):
+            comp = F2 * m                                    # 대역 필터링
+            img = torch.fft.ifft2(comp, norm='ortho').abs()  # magnitude 사용
             if self.norm:
-                img_back = torch.clamp(img_back, 0, 255) 
+                mn = img.amin(dim=(-2, -1), keepdim=True)
+                mx = img.amax(dim=(-2, -1), keepdim=True)
+                img = (img - mn) / (mx - mn + self.eps)
+            outs.append(img)
 
-            outs.append(img_back)
+        y = torch.cat(outs, dim=1)  # [B,2,H,W]
+        return y.to(dtype=orig_dtype)
 
-        return torch.cat(outs, dim=1).to(x.dtype)  # [B,3,H,W]
-    
-# class PhaseIFFTStack(nn.Module):
-#     """
-#     FFT 한 번 → 대역(mask) 3개 → IFFT → [B,3,H,W] (low, mid, high)
-
-#     YAML Args
-#         c1          (자동) 입력 채널
-#         c2          (무시) 항상 3 채널 출력
-#         cut_low     저역 반경 (학습 가능)
-#         cut_high    고역 반경 (항상 1.0로 고정)
-#         norm        True → 0~1 정규화
-#     """
-#     def __init__(self, c1, c2=3, cut_low=0.11, cut_high=1.0, norm=True, eps=1e-6):
-#         super().__init__()
-#         self.cut_low = 0.1  # 학습 가능한 파라미터
-#         self.cut_high = 1.0  # 고정 값 (입력 무시)
-#         self.norm = norm
-#         self.eps = eps
-#         self.register_buffer("rgb2y",
-#             torch.tensor([0.2989, 0.5870, 0.1140]).view(1, 3, 1, 1))
-#         self.c2 = 3
-
-#     # ── 내부: 마스크 만들기
-#     def _masks(self, H, W, dev):
-#         fy = torch.fft.fftfreq(H, device=dev).view(-1,1).repeat(1,W)
-#         fx = torch.fft.fftfreq(W, device=dev).view(1,-1).repeat(H,1)
-#         r  = torch.fft.fftshift((fx**2 + fy**2).sqrt())
-
-#         # cut_low는 학습 가능한 파라미터 → item()으로 float로 변환
-#         low_val  = self.cut_low  # 안정성 위해 clamp
-#         high_val = self.cut_high
-
-#         low  = (r <= low_val)
-#         mid  = (r >  low_val) & (r <= high_val)
-#         high = (r >  high_val)
-#         return low, mid, high
-
-#     @torch.cuda.amp.autocast(enabled=False)
-#     def forward(self, x):
-#         # RGB→Gray
-#         if x.shape[1] == 3:
-#             x = (x * self.rgb2y.to(x.dtype)).sum(1, keepdim=True)
-
-#         F = torch.fft.fft2(x.float(), norm='ortho')
-
-#         outs = []
-#         for m in self._masks(x.shape[2], x.shape[3], x.device):
-#             comp = torch.fft.ifftshift(F * m)
-#             #y = torch.fft.ifft2(comp, norm='ortho').real
-#             y = torch.fft.ifft2(comp, norm='ortho').abs()
-#             #print(type(y))
-#             if self.norm:
-#                 y = torch.clamp(y, 0, 255) / 255.0
-#             outs.append(y)
-
-#         return torch.cat(outs, 1).to(x.dtype)  # [B, 3, H, W]
-    
 class PhaseIFFT_1(nn.Module):
     def __init__(self, c1, c2=1, keep_rgb_channels=False,
                  eps=1e-6, norm=True):
@@ -2266,3 +2255,71 @@ class SAVPE(nn.Module):
         aggregated = score.transpose(-2, -3) @ x.reshape(B, self.c, C // self.c, -1).transpose(-1, -2)
 
         return F.normalize(aggregated.transpose(-2, -3).reshape(B, Q, -1), dim=-1, p=2)
+
+############### c3k2 gated ###################
+def resize_to(x: torch.Tensor, hw):
+    """x: [B,C,Hx,Wx] → [B,C,h,w]"""
+    h, w = hw
+    if x.shape[-2:] != (h, w):
+        x = F.interpolate(x, size=(h, w), mode="bilinear", align_corners=False)
+    return x
+
+class C3k2Gated(C2f):
+    """
+    C3k2(+gate) with multi-channel mask
+      inputs: x  또는 [x, mask]
+      mask  : [B, Cm, Hm, Wm]  (예: Cm=2 for low/high)
+        → resize_to(..., (h,w)) → 1x1 conv(Cm→self.c) → sigmoid → [B,self.c,h,w]
+        → 각 bottleneck 출력에 a * (1 + α·m) 곱 게이트
+    """
+    def __init__(self, c1, c2, n=1, c3k=False, e=0.5, g=1, shortcut=True,
+                 mask_ch: int = 1, use_alpha: bool = False, alpha_init: float = 0.0):
+        super().__init__(c1, c2, n, shortcut, g, e)  # cv1, cv2, self.c 생성
+
+        # 내부 블록(C3k 또는 Bottleneck) 구성
+        self.m = nn.ModuleList(
+            C3k(self.c, self.c, 2, shortcut, g) if c3k else Bottleneck(self.c, self.c, shortcut, g)
+            for _ in range(n)
+        )
+
+        # 멀티채널 마스크 → self.c 채널 게이트로 투영
+        self.mask_proj = nn.Conv2d(mask_ch, self.c, kernel_size=1, bias=True)
+        nn.init.zeros_(self.mask_proj.weight)  # 초기 영향 최소화
+        nn.init.zeros_(self.mask_proj.bias)
+
+        # α 스칼라(옵션). 기본은 끔(=굳이 없어도 됨)
+        self.use_alpha = bool(use_alpha)
+        if self.use_alpha:
+            self.alpha = nn.Parameter(torch.tensor(float(alpha_init)))  # 보통 0.0로 중립 시작 추천
+
+    def _gate(self, feat: torch.Tensor, mask: torch.Tensor | None):
+        if mask is None:
+            return feat
+        # mask: [B,Cm,h,w] → 1x1 conv → sigmoid → [B,self.c,h,w]
+        m = torch.sigmoid(self.mask_proj(mask))
+        if self.use_alpha:
+            return feat * (1.0 + self.alpha * m)
+        else:
+            return feat * (1.0 + m)
+
+    def forward(self, inputs):
+        # inputs: x  또는 [x, mask]
+        if isinstance(inputs, (list, tuple)):
+            x, raw_mask = inputs[0], inputs[1]
+        else:
+            x, raw_mask = inputs, None
+
+        y = list(self.cv1(x).chunk(2, 1))  # [a, b]
+
+        # C2f의 extend 구간만 후킹해서 게이트 삽입
+        out = y[-1]
+        for blk in self.m:
+            t = blk(out)
+            if raw_mask is not None:
+                m = resize_to(raw_mask, t.shape[-2:])  # 다운샘플/업샘플로 공간 해상도 맞춤
+                t = self._gate(t, m)
+            y.append(t)
+            out = t
+
+        return self.cv2(torch.cat(y, 1))
+############### c3k2 gated ###################
