@@ -7,7 +7,7 @@ from ultralytics import YOLO
 import yaml
 
 # 모델 로드
-experiment_name = "experiment_01"
+experiment_name = "experiment_07"
 model_path = f'../experiments/{experiment_name}/train/weights/best.pt'
 yaml_path = f"../configs/{experiment_name}.yaml"
 model = YOLO(model_path)
@@ -57,7 +57,7 @@ for idx, name in enumerate(layer_types):
 img_path = "./ex_s.jpg"
 results = model.predict(source=img_path, imgsz=640, save=False, verbose=False)
 # Hook된 feature map 저장 (레이어별로 폴더 분리)
-base_dir = "experiment_01_backbone_output"
+base_dir = f"{experiment_name}_backbone_output"
 os.makedirs(base_dir, exist_ok=True)
 for name, fmap in feature_maps.items():
     if "Detect" in name:
