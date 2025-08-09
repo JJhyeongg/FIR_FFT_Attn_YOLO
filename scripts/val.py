@@ -3,14 +3,14 @@ import pandas as pd
 from ultralytics import YOLO
 
 data_name = 'data01'
-experiment_name = "experiment_12"
+experiment_name = "experiment_01"
 
 # 모델 로드
 model = YOLO(f"../experiments/{experiment_name}/train/weights/best.pt")
 
 # 검증 실행
 metrics = model.val(
-    data    = f'../Dataset/{data_name}/data_test.yaml',
+    data    = f'../Dataset/{data_name}/data.yaml',
     imgsz = 640,
     device="0",
     project= f"../experiments/{experiment_name}",

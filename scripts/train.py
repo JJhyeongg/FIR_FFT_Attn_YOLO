@@ -11,8 +11,8 @@ if __name__ == '__main__':
     imgsz = 640
     device = '0'  # 0번과 1번 GPU를 사용하도록 명시적으로 지정
     data_name = "data01"
-    experiment_name = "experiment_01"
-    config_name = "experiment_01n"
+    experiment_name = "experiment_07"
+    config_name = "experiment_07n"
     model_name = "yolo11n"
     #model = YOLO(f'../configs/{config_name}.yaml').load(f'{model_name}.pt')
 
