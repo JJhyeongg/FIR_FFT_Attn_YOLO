@@ -15,6 +15,7 @@ from .transformer import TransformerBlock
 __all__ = (
     "FIRStack",
     "C3k2Gated",
+    "C3k2GatedV2",
     "Multiply",
     "GateAdd",
     "PhaseIFFTStack",
@@ -153,31 +154,30 @@ import torch.nn.functional as F
 class PhaseIFFTStack(nn.Module):
     """
     FFT → 주파수 대역 분리(low, high) → IFFT → [B,2,H,W]
-      - 채널 0: low  (r <= cut_low)
-      - 채널 1: high (r >= cut_high)
+      - 채널 0: low  (r <= cut)
+      - 채널 1: high (r >= cut)
 
     Args:
         c1 (int): 입력 채널 수 (RGB=3 가정 시 자동 Y 변환)
         c2 (int): 항상 2로 고정 (low, high)
-        cut_low (float): 저역 컷오프 (주파수 반경, 권장 범위 0~0.5)
-        cut_high (float): 고역 컷오프 (권장 범위 0~0.5, cut_high >= cut_low)
-        norm (bool): 대역 복원 결과를 각 샘플별 [0,1] 정규화 여부
-        eps (float): 정규화 안정성용 epsilon
-    Notes:
-        - 주파수 반경은 torch.fft.fftfreq 기반(단위: cycles/pixel), 최대 0.5 부근.
-        - AMP 혼합정밀 학습에서도 안전하도록 autocast 비활성 + float32 강제.
+        cut_low (float): 초기 컷오프 (0~0.5)  *learnable=True면 초기값으로만 쓰임
+        cut_high (float): 무시(호환용), learnable=True면 cut_low와 동일하게 묶임
+        norm (bool): 대역 복원 결과 [0,1] 정규화
+        eps (float): 정규화 안정성 epsilon
+        learnable (bool): True면 단일 컷(cut) 학습 (low==high)
     """
-
     def __init__(self, c1: int, c2: int = 2,
                  cut_low: float = 0.11, cut_high: float = 0.11,
-                 norm: bool = False, eps: float = 1e-6):
+                 norm: bool = False, eps: float = 1e-6,
+                 learnable: bool = False):
         super().__init__()
         assert c2 == 2, "PhaseIFFTStack은 2채널(low, high)만 지원합니다."
         self.c2 = 2
         self.cut_low = float(cut_low)
-        self.cut_high = float(cut_high)
+        self.cut_high = float(cut_high)  # 호환용(learnable=True면 무시)
         self.norm = bool(norm)
         self.eps = float(eps)
+        self.learnable = bool(learnable)
 
         # RGB -> Y 변환 가중치
         self.register_buffer(
@@ -186,56 +186,75 @@ class PhaseIFFTStack(nn.Module):
             persistent=False
         )
 
-        self._sanitize_cuts()
+        if self.learnable:
+            # 단일 컷 파라미터 u (unconstrained) → cut = 0.5 * sigmoid(u) ∈ (0,0.5)
+            init = max(1e-6, min(1 - 1e-6, self.cut_low / 0.5))
+            u0 = torch.logit(torch.tensor(init, dtype=torch.float32))
+            self.cut_u = nn.Parameter(u0)
+        else:
+            self._sanitize_cuts()
 
     def _sanitize_cuts(self):
-        # 권장 범위 0~0.5로 클램프, cut_high >= cut_low 강제
         lo = max(0.0, min(0.5, self.cut_low))
         hi = max(0.0, min(0.5, self.cut_high))
         if hi < lo:
             hi = lo
         self.cut_low, self.cut_high = lo, hi
 
-    def _make_masks(self, H: int, W: int, device, dtype):
-        # 주파수 그리드 (cycles/pixel). 범위 대략 [-0.5, 0.5)
+    def _make_r(self, H: int, W: int, device, dtype):
         fy = torch.fft.fftfreq(H, device=device, dtype=dtype).view(-1, 1).repeat(1, W)
         fx = torch.fft.fftfreq(W, device=device, dtype=dtype).view(1, -1).repeat(H, 1)
-        r = torch.sqrt(fx * fx + fy * fy)  # 0 ~ ~0.5
+        return torch.sqrt(fx * fx + fy * fy)  # [H,W] in [0,~0.5]
 
-        low_mask = (r <= self.cut_low)
-        high_mask = (r >= self.cut_high)
-        return low_mask, high_mask
+    def _hard_masks_with_ste(self, r: torch.Tensor, cut: torch.Tensor):
+        """
+        하드 마스크로 forward, soft surrogate로 backward (STE).
+        출력은 이진이나, 기울기는 고정된 경사(k)를 가진 sigmoid로 흘리게 함.
+        추가 하이퍼파라미터는 두지 않고 k=50.0 고정.
+        """
+        k = 50.0  # 고정 기울기(노출 파라미터 아님)
+        # hard
+        low_h  = (r <= cut).to(r.dtype)
+        high_h = (r >= cut).to(r.dtype)
+        # surrogate for grad (detach trick)
+        low_s  = torch.sigmoid(k * (cut - r))
+        high_s = torch.sigmoid(k * (r - cut))
+        low  = low_h  + (low_s  - low_s.detach())
+        high = high_h + (high_s - high_s.detach())
+        return low, high
+
+    def _make_masks(self, H: int, W: int, device, dtype):
+        r = self._make_r(H, W, device, dtype)
+        if self.learnable:
+            cut = 0.5 * torch.sigmoid(self.cut_u)  # scalar
+            low_m, high_m = self._hard_masks_with_ste(r, cut)
+        else:
+            low_m  = (r <= self.cut_low).to(dtype)
+            high_m = (r >= self.cut_high).to(dtype)
+
+        low_m  = low_m.view(1, 1, H, W)
+        high_m = high_m.view(1, 1, H, W)
+        return low_m, high_m
 
     @torch.cuda.amp.autocast(enabled=False)
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        x: [B,C,H,W] (C=3 권장)
-        return: [B,2,H,W]  (0=low, 1=high), 입력 dtype으로 반환
-        """
         orig_dtype = x.dtype
 
-        # RGB -> Y (C==3이면)
+        # RGB -> Y
         if x.shape[1] == 3:
-            # rgb2y는 buffer라 x dtype에 맞춰 cast
             x = (x * self.rgb2y.to(dtype=x.dtype, device=x.device)).sum(1, keepdim=True)
 
-        # FFT 연산은 float32로 고정 (AMP off)
+        # FFT는 float32
         x32 = x.float()
-
         B, C, H, W = x32.shape
-        device = x32.device
 
-        # 2D FFT
-        F2 = torch.fft.fft2(x32, norm='ortho')              # [B,1,H,W]
-        # 주파수 마스크
-        low_m, high_m = self._make_masks(H, W, device, dtype=x32.dtype)  # bool
-        low_m = low_m.view(1, 1, H, W)
-        high_m = high_m.view(1, 1, H, W)
+        F2 = torch.fft.fft2(x32, norm='ortho')  # complex64
+        low_m, high_m = self._make_masks(H, W, x32.device, x32.dtype)  # real float
 
         outs = []
         for m in (low_m, high_m):
-            comp = F2 * m                                    # 대역 필터링
-            img = torch.fft.ifft2(comp, norm='ortho').abs()  # magnitude 사용
+            comp = F2 * m.to(F2.dtype)  # 실수 마스크를 복소수에 곱함
+            img = torch.fft.ifft2(comp, norm='ortho').abs()
             if self.norm:
                 mn = img.amin(dim=(-2, -1), keepdim=True)
                 mx = img.amax(dim=(-2, -1), keepdim=True)
@@ -244,6 +263,7 @@ class PhaseIFFTStack(nn.Module):
 
         y = torch.cat(outs, dim=1)  # [B,2,H,W]
         return y.to(dtype=orig_dtype)
+
 
 import torch
 import torch.nn as nn
@@ -2502,3 +2522,117 @@ class C3k2Gated(C2f):
 
         return self.cv2(torch.cat(y, 1))
 ############### c3k2 gated ###################
+
+############### c3k2 gated v2 ###################
+class C3k2GatedV2(C2f):
+    """
+    개선 포인트
+      - 게이트는 Bottleneck의 residual 결과에만 적용 (bypass 보존)
+      - MaskTower: DWConv3x3→BN→SiLU→Conv1x1 로 마스크 정제
+      - FiLM 게이팅: gate = sigmoid((γ_hat / τ)) , out = y * (1 + α * γ_hat) + β
+      - α: 채널별 learnable scale (초기 0)  / β: 위치별 bias
+      - multi-scale mask pyramid (1, 1/2, 1/4) → 1×1 합성
+      - detach_mask 옵션으로 마스크 역전파 제어
+    Args:
+      mask_ch: 입력 마스크 채널 수 (low/high면 1 또는 2)
+      use_alpha: α 사용 여부
+      alpha_init: α 초기값(보통 0.0)
+      use_multiscale: 멀티스케일 마스크 사용
+      detach_mask: 마스크 역전파 차단
+      temperature_init: 게이트 온도 초기값(>0)
+    """
+    def __init__(self, c1, c2, n=1, c3k=False, e=0.5, g=1, shortcut=True,
+                 mask_ch: int = 1,
+                 use_alpha: bool = True, alpha_init: float = 0.0,
+                 use_multiscale: bool = True,
+                 detach_mask: bool = False,
+                 temperature_init: float = 2.0):
+        super().__init__(c1, c2, n, shortcut, g, e)  # cv1, cv2, self.c
+        # 내부 블록: Bottleneck 또는 C3k
+        self.blocks = nn.ModuleList(
+            (C3k(self.c, self.c, 2, shortcut, g) if c3k else Bottleneck(self.c, self.c, shortcut, g))
+            for _ in range(n)
+        )
+        # ── Mask tower ─────────────────────────────
+        self.m_dw = nn.Conv2d(mask_ch, mask_ch, 3, 1, 1, groups=mask_ch, bias=False)
+        self.m_bn = nn.BatchNorm2d(mask_ch)
+        self.m_pw = nn.Conv2d(mask_ch, self.c, 1, bias=True)
+        # (γ, β) 생성: 채널 2×c → split
+        self.m_to_gamma_beta = nn.Conv2d(self.c, 2 * self.c, 1, bias=True)
+
+        # learnable α (채널별)
+        self.use_alpha = use_alpha
+        if self.use_alpha:
+            self.alpha = nn.Parameter(torch.full((self.c,), float(alpha_init)))
+
+        # learnable temperature τ(>0) → softplus 로 보장
+        self.log_tau = nn.Parameter(torch.log(torch.tensor(temperature_init, dtype=torch.float32)))
+
+        # 옵션들
+        self.use_multiscale = bool(use_multiscale)
+        self.detach_mask = bool(detach_mask)
+
+        # 초기화: mask 경로는 영향 작게
+        nn.init.kaiming_normal_(self.m_dw.weight, mode="fan_out", nonlinearity="relu")
+        nn.init.zeros_(self.m_pw.weight); nn.init.zeros_(self.m_pw.bias)
+        nn.init.zeros_(self.m_to_gamma_beta.weight); nn.init.zeros_(self.m_to_gamma_beta.bias)
+
+    @staticmethod
+    def _interp(x, hw):
+        h, w = hw
+        if x.shape[-2:] != (h, w):
+            x = F.interpolate(x, size=(h, w), mode="bilinear", align_corners=False)
+        return x
+
+    def _mask_pyramid(self, m, hw):
+        # 1×, 1/2×, 1/4× 평균풀링 피라미드 → 업샘플 후 concat → 1×1
+        h, w = hw
+        ms = [m]
+        if self.use_multiscale and min(h, w) >= 4:
+            ms.append(F.avg_pool2d(m, 2, 2))
+            if min(h, w) >= 8:
+                ms.append(F.avg_pool2d(m, 4, 4))
+        ms = [self._interp(t, (h, w)) for t in ms]
+        return torch.mean(torch.stack(ms, dim=0), dim=0)  # 간단히 평균(가볍게)
+
+    def _build_gate(self, m, hw):
+        # 필요 시 detach 로 역전파 차단
+        if self.detach_mask:
+            m = m.detach()
+        m = self._mask_pyramid(m, hw)
+        # DWConv → BN → SiLU → PW (c 채널)
+        m = self.m_pw(F.silu(self.m_bn(self.m_dw(m))))
+        # (γ, β) 생성
+        gamma_beta = self.m_to_gamma_beta(m)             # [B, 2c, h, w]
+        gamma, beta = gamma_beta.chunk(2, dim=1)         # [B, c, h, w] 각
+        # 온도 조절된 게이트
+        tau = F.softplus(self.log_tau) + 1e-6
+        gate = torch.sigmoid(gamma / tau)                # [0,1]
+        return gate, beta
+
+    def forward(self, inputs):
+        if isinstance(inputs, (list, tuple)):
+            x, raw_mask = inputs[0], inputs[1]
+        else:
+            x, raw_mask = inputs, None
+
+        a, b = self.cv1(x).chunk(2, 1)       # C2f 기본 분기
+        y = [b]                               # residual 경로 스택의 입력
+
+        out = b
+        for blk in self.blocks:
+            t = blk(out)                      # residual 변환 결과
+            if raw_mask is not None:
+                m = self._interp(raw_mask, t.shape[-2:])
+                gate, beta = self._build_gate(m, t.shape[-2:])
+                if self.use_alpha:
+                    # 채널별 α 적용 (broadcast)
+                    t = t * (1.0 + self.alpha.view(1, -1, 1, 1) * gate) + beta
+                else:
+                    t = t * (1.0 + gate) + beta
+            y.append(t)
+            out = t
+
+        # bypass(a)와 gated residual 스택 concat → 1×1
+        return self.cv2(torch.cat([a] + y, dim=1))
+###############################################################

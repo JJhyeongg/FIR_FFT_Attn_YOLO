@@ -14,6 +14,7 @@ from ultralytics.nn.autobackend import check_class_names
 from ultralytics.nn.modules import (
     FIRStack,
     C3k2Gated,
+    C3k2GatedV2,
     Multiply,
     GatedAdd,
     PhaseIFFTStack,
@@ -1618,6 +1619,7 @@ def parse_model(d, ch, verbose=True):
     base_modules = frozenset(
         {
             C3k2Gated,
+            C3k2GatedV2,
             PhaseIFFT_1,
             Classify,
             Conv,
@@ -1658,6 +1660,7 @@ def parse_model(d, ch, verbose=True):
     repeat_modules = frozenset(  # modules with 'repeat' arguments
         {
             C3k2Gated,
+            C3k2GatedV2,
             BottleneckCSP,
             C1,
             C2,
