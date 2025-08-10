@@ -7,12 +7,12 @@ import os
 if __name__ == '__main__':
     # GPU 설정 (여러 GPU 사용 가능)
     epochs = 1500
-    batch = 60
+    batch = 120
     imgsz = 640
     device = '0'  # 0번과 1번 GPU를 사용하도록 명시적으로 지정
     data_name = "data01"
-    experiment_name = "experiment_07"
-    config_name = "experiment_07n"
+    experiment_name = "experiment_11"
+    config_name = "experiment_11n"
     model_name = "yolo11n"
     #model = YOLO(f'../configs/{config_name}.yaml').load(f'{model_name}.pt')
 
@@ -33,6 +33,7 @@ if __name__ == '__main__':
     # 데이터 증강 설정
     results = model.train(
         data=f'../Dataset/{data_name}/data.yaml',
+        pretrained = False,  # 사전 훈련된 가중치 사용 안함
         epochs=epochs,
         batch=batch,
         imgsz=imgsz,
