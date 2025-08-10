@@ -13,7 +13,8 @@ __pycache__/
 # VSCode settings
 .vscode/
 .experiment/
-
+experiments/
+Dataset/**/labels.cache
 # Mac/Linux/Windows system files
 .DS_Store
 Thumbs.db
