@@ -7,12 +7,12 @@ import os
 if __name__ == '__main__':
     # GPU 설정 (여러 GPU 사용 가능)
     epochs = 1500
-    batch = 120
+    batch = 60
     imgsz = 640
     device = '0'  # 0번과 1번 GPU를 사용하도록 명시적으로 지정
     data_name = "data01"
-    experiment_name = "experiment_01"
-    config_name = "experiment_01n"
+    experiment_name = "experiment_08"
+    config_name = "experiment_08n"
     model_name = "yolo11n"
     #model = YOLO(f'../configs/{config_name}.yaml').load(f'{model_name}.pt')
 
@@ -32,7 +32,8 @@ if __name__ == '__main__':
 
     # 데이터 증강 설정
     results = model.train(
-        data=f'../Dataset/{data_name}/data.yaml',
+        data=f'VisDrone.yaml',
+        pretrained = False,
         epochs=epochs,
         batch=batch,
         imgsz=imgsz,
