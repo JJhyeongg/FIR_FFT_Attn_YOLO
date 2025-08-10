@@ -13,7 +13,7 @@ __pycache__/
 # VSCode settings
 .vscode/
 .experiment/
-
+test_scripts/backbone/
 # Mac/Linux/Windows system files
 .DS_Store
 Thumbs.db
