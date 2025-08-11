@@ -3,7 +3,7 @@ import pandas as pd
 from ultralytics import YOLO
 
 data_name = 'data01'
-experiment_name = "experiment_08"
+experiment_name = "experiment_10"
 
 # 모델 로드
 model = YOLO(f"../experiments/{experiment_name}/train/weights/best.pt")

@@ -7,7 +7,7 @@ from ultralytics import YOLO
 import yaml
 
 # 모델 로드
-experiment_name = "experiment_07"
+experiment_name = "experiment_13"
 model_path = f'../experiments/{experiment_name}/train/weights/best.pt'
 yaml_path = f"../configs/{experiment_name}.yaml"
 model = YOLO(model_path)
@@ -49,15 +49,22 @@ for idx, name in enumerate(layer_types):
     try:
         layer = model.model.model[idx]
         handles.append(layer.register_forward_hook(make_hook(idx, name)))
+        # PhaseIFFTStack 파라미터 출력
+        if name == "PhaseIFFTStack":
+            print(f"PhaseIFFTStack params at layer {idx}:")
+            print(f"  cut_low: {getattr(layer, 'cut_low', None)}")
+            print(f"  cut_high: {getattr(layer, 'cut_high', None)}")
+            print(f"  norm: {getattr(layer, 'norm', None)}")
+            print(f"  learnable: {getattr(layer, 'learnable', None)}")
     except IndexError:
         print(f"Warning: Layer {idx} ({name}) not found in model")
         break
 
 # 이미지 전처리 및 모델 통과
-img_path = "./ex_s.jpg"
+img_path = "./ex_v.jpg"
 results = model.predict(source=img_path, imgsz=640, save=False, verbose=False)
 # Hook된 feature map 저장 (레이어별로 폴더 분리)
-base_dir = f"{experiment_name}_backbone_output"
+base_dir = f"./backbone/{experiment_name}_backbone_output"
 os.makedirs(base_dir, exist_ok=True)
 for name, fmap in feature_maps.items():
     if "Detect" in name:
