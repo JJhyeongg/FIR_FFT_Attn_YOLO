@@ -7,7 +7,7 @@ from ultralytics import YOLO
 import yaml
 
 # 모델 로드
-experiment_name = "experiment_07"
+experiment_name = "experiment_13"
 model_path = f'../experiments/{experiment_name}/train/weights/best.pt'
 yaml_path = f"../configs/{experiment_name}.yaml"
 model = YOLO(model_path)

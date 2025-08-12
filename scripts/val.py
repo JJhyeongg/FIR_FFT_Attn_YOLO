@@ -3,7 +3,7 @@ import pandas as pd
 from ultralytics import YOLO
 
 data_name = 'data01'
-experiment_name = "experiment_11"
+experiment_name = "experiment_23"
 
 # 모델 로드
 model = YOLO(f"../experiments/{experiment_name}/train/weights/best.pt")
@@ -12,7 +12,7 @@ model = YOLO(f"../experiments/{experiment_name}/train/weights/best.pt")
 metrics = model.val(
     data    = f'../Dataset/{data_name}/data.yaml',
     imgsz = 640,
-    device="0",
+    device="1",
     project= f"../experiments/{experiment_name}",
     name= f'val'
 )
