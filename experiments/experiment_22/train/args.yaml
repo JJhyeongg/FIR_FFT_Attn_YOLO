@@ -1,6 +1,6 @@
 task: detect
 mode: train
-model: ../experiments/experiment_12/train/weights/last.pt
+model: ../configs/experiment_22n.yaml
 data: ../Dataset/data01/data.yaml
 epochs: 1500
 time: null
@@ -12,7 +12,7 @@ save_period: 5000
 cache: false
 device: '0'
 workers: 6
-project: ../experiments/experiment_12
+project: ../experiments/experiment_22
 name: train
 exist_ok: false
 pretrained: false
@@ -24,7 +24,7 @@ single_cls: false
 rect: false
 cos_lr: false
 close_mosaic: 10
-resume: ../experiments/experiment_12/train/weights/last.pt
+resume: null
 amp: true
 fraction: 1.0
 profile: false
@@ -75,7 +75,7 @@ momentum: 0.937
 weight_decay: 0.0005
 warmup_epochs: 3.0
 warmup_momentum: 0.8
-warmup_bias_lr: 0.0
+warmup_bias_lr: 0.1
 box: 7.5
 cls: 0.5
 dfl: 1.5
@@ -102,4 +102,4 @@ auto_augment: randaugment
 erasing: 0.4
 cfg: null
 tracker: botsort.yaml
-save_dir: ../experiments/experiment_12/train
+save_dir: ../experiments/experiment_22/train
