@@ -12,7 +12,7 @@ model = YOLO(f"../experiments/{experiment_name}/train/weights/best.pt")
 metrics = model.val(
     data    = f'../Dataset/{data_name}/data.yaml',
     imgsz = 640,
-    device="0",
+    device="1",
     project= f"../experiments/{experiment_name}",
     name= f'val'
 )
