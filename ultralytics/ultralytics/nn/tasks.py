@@ -17,6 +17,7 @@ from ultralytics.nn.modules import (
     C3k2GatedV2,
     Multiply,
     GatedAdd,
+    LearnedIFFTMask,
     PhaseIFFTStack,
     ChSelect,
     PhaseIFFT_1,
@@ -1716,7 +1717,7 @@ def parse_model(d, ch, verbose=True):
             if m is C2fCIB:
                 legacy = False
         #####################################################################3
-        elif m in {FIRStack, PhaseIFFTStack, ChSelect, GatedAdd, Multiply}:        # ★ 추가
+        elif m in {FIRStack,LearnedIFFTMask,PhaseIFFTStack, ChSelect, GatedAdd, Multiply}:        # ★ 추가
             # 이 블록들은 출력 채널을 그대로 써야 한다 → make_divisible 적용 금지
             if isinstance(f, list):
                 c1 = ch[f[0]]          # 두 입력 채널이 같다고 가정

@@ -13,6 +13,7 @@ from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad
 from .transformer import TransformerBlock
 
 __all__ = (
+    "LearnedIFFTMask",
     "FIRStack",
     "C3k2Gated",
     "C3k2GatedV2",
@@ -65,6 +66,104 @@ __all__ = (
 
 # custom
 
+class LearnedIFFTMask(nn.Module):
+    """
+    입력:  x [B,C,H,W] (C=3이면 Y로 자동 변환)
+    출력:  A [B,1,H,W] (0~1)  ← '영역' 강조 마스크 단일 채널
+
+    원리: FFT -> (이미지별 soft 주파수 마스크 1개) -> IFFT -> |·|^2 -> 블러 -> 정규화
+    특징:
+      - 하드 컷오프 없이 이미지별로 달라지는 마스크를 '학습' (soft)
+      - |·|^2 + blur로 엣지가 아니라 '면(영역)'이 뜸
+      - attn_res에서 계산 후 원해상도 복원(오버헤드 낮음)
+    """
+    def __init__(self,c1: int, c2: int = 1,
+                 attn_res: int = 80,
+                 hidden: int = 96,
+                 temp: float = 5.0,          # 마스크 로짓 스케일(초기 분포 벌리기)
+                 blur: str = 'avg',          # 'avg' | 'gauss'
+                 norm: str = 'minmax',       # 'minmax' | 'z'
+                 eps: float = 1e-6):
+        super().__init__()
+        self.c2 = 1
+        self.attn_res = attn_res
+        self.temp = float(temp)
+        self.norm = norm
+        self.eps = eps
+
+        # RGB -> Y 변환 계수
+        self.register_buffer("rgb2y",
+            torch.tensor([0.2989, 0.5870, 0.1140]).view(1,3,1,1),
+            persistent=False)
+
+        # log|F| -> 마스크 로짓(단일 채널)
+        self.mask_net = nn.Sequential(
+            nn.Conv2d(1, hidden, 3, padding=1), nn.SiLU(),
+            nn.Conv2d(hidden, hidden, 3, padding=1), nn.SiLU(),
+            nn.Conv2d(hidden, 1, 1)
+        )
+
+        if blur == 'avg':
+            self.blur = nn.AvgPool2d(kernel_size=3, stride=1, padding=1)
+            self._use_gauss = False
+        elif blur == 'gauss':
+            # 간단한 separable 가우시안(1,2,1)
+            g = torch.tensor([1., 2., 1.], dtype=torch.float32)
+            g = (g / g.sum()).view(1,1,1,3)
+            self.register_buffer("g1", g, persistent=False)
+            self.register_buffer("g2", g.transpose(-1,-2), persistent=False)
+            self._use_gauss = True
+        else:
+            raise ValueError("blur must be 'avg' or 'gauss'")
+
+    @torch.cuda.amp.autocast(enabled=False)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: [B,C,H,W]  ->  A: [B,1,H,W] (0~1)
+        """
+        orig_dtype = x.dtype
+        B, C, H, W = x.shape
+
+        # 1) Y 채널 + 해상도 축소
+        y = x[:, :1] if C == 1 else (x * self.rgb2y.to(x)).sum(1, keepdim=True)
+        if (H, W) != (self.attn_res, self.attn_res):
+            y = F.interpolate(y, (self.attn_res, self.attn_res),
+                              mode='bilinear', align_corners=False)
+        h, w = y.shape[-2:]
+
+        # 2) FFT & 마스크 예측
+        Fz  = torch.fft.fft2(y.float(), norm='ortho')        # [B,1,h,w] (complex)
+        mag = torch.log(torch.abs(Fz).clamp_min(1e-6))       # [B,1,h,w]
+        logits = self.mask_net(mag)                          # [B,1,h,w]
+        M = torch.sigmoid(self.temp * logits)                # (0,1)
+
+        # 실수 IFFT 안정: 에르미트 대칭 근사 + ifftshift
+        M = 0.5 * (M + torch.flip(M, dims=[-2, -1]))
+        M = torch.fft.ifftshift(M, dim=(-2, -1))
+
+        # 3) IFFT -> |·|^2 -> 블러 -> 정규화 -> 시그모이드/0~1
+        a = torch.fft.ifft2(Fz * M, norm='ortho').real       # [B,1,h,w]
+        E = (a.abs() ** 2)
+        if self._use_gauss:
+            E = F.conv2d(E, self.g1, padding=(0,1), groups=1)
+            E = F.conv2d(E, self.g2, padding=(1,0), groups=1)
+        else:
+            E = self.blur(E)
+
+        if self.norm == 'z':
+            E = (E - E.mean((-2,-1), keepdim=True)) / (E.std((-2,-1), keepdim=True) + self.eps)
+            A = torch.sigmoid(E)
+        else:  # 'minmax'
+            mn = E.amin(dim=(-2,-1), keepdim=True)
+            mx = E.amax(dim=(-2,-1), keepdim=True)
+            A = (E - mn) / (mx - mn + self.eps)
+
+        # 4) 원 해상도로 업샘플
+        if (h, w) != (H, W):
+            A = F.interpolate(A, (H, W), mode='bilinear', align_corners=False)
+
+        return A.to(orig_dtype)
+    
 class Multiply(nn.Module):
     """
     Multiply: out = x * mask
