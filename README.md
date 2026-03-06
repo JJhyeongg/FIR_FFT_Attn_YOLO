@@ -1,4 +1,4 @@
-# YOLO-FPSA: YOLO + Frequency Phase-Shifted Attention
+# YOLO-FPSA: YOLOv11 + Frequency Phase-Shifted Attention
 
 ##  Overview
 This repo modifies Ultralytics YOLO to add FFT-based frequency and phase-shifted attention for small object detection.
